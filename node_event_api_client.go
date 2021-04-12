@@ -99,22 +99,21 @@ func sendErrOrDrop(errChan chan error, err error) {
 
 // Connect connects the NodeEventAPIClient to the specified brokers.
 // The NodeEventAPIClient remains active as long as the given context isn't done/cancelled.
+// This function also cleans all registered channels
 func (neac *NodeEventAPIClient) Connect(ctx context.Context) error {
 	neac.Ctx = ctx
 	if token := neac.MQTTClient.Connect(); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
+	go func() {
+		<-neac.Ctx.Done()
+		neac.MQTTClient.Disconnect(0)
+	}()
 	return nil
 }
 
-// Close disconnects the underlying MQTT client.
-// Call this function to clean up any registered channels.
-func (neac *NodeEventAPIClient) Close() {
-	neac.MQTTClient.Disconnect(0)
-}
-
 // Messages returns a channel of newly received messages.
-func (neac *NodeEventAPIClient) Messages() <-chan *Message {
+func (neac *NodeEventAPIClient) Messages(ctx context.Context) <-chan *Message {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *Message)
 	neac.MQTTClient.Subscribe(NodeEventMessages, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -129,11 +128,19 @@ func (neac *NodeEventAPIClient) Messages() <-chan *Message {
 		case channel <- msg:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventMessages)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // ReferencedMessagesMetadata returns a channel of message metadata of newly referenced messages.
-func (neac *NodeEventAPIClient) ReferencedMessagesMetadata() <-chan *MessageMetadataResponse {
+func (neac *NodeEventAPIClient) ReferencedMessagesMetadata(ctx context.Context) <-chan *MessageMetadataResponse {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *MessageMetadataResponse)
 	neac.MQTTClient.Subscribe(NodeEventMessagesReferenced, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -148,11 +155,19 @@ func (neac *NodeEventAPIClient) ReferencedMessagesMetadata() <-chan *MessageMeta
 		case channel <- metadataRes:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventMessagesReferenced)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // ReferencedMessages returns a channel of newly referenced messages.
-func (neac *NodeEventAPIClient) ReferencedMessages(nodeHTTPAPIClient *NodeHTTPAPIClient) <-chan *Message {
+func (neac *NodeEventAPIClient) ReferencedMessages(ctx context.Context, nodeHTTPAPIClient *NodeHTTPAPIClient) <-chan *Message {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *Message)
 	neac.MQTTClient.Subscribe(NodeEventMessagesReferenced, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -173,14 +188,23 @@ func (neac *NodeEventAPIClient) ReferencedMessages(nodeHTTPAPIClient *NodeHTTPAP
 		case channel <- msg:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventMessagesReferenced)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // MessagesWithIndex returns a channel of newly received messages with the given index.
-func (neac *NodeEventAPIClient) MessagesWithIndex(index string) <-chan *Message {
+func (neac *NodeEventAPIClient) MessagesWithIndex(ctx context.Context, index string) <-chan *Message {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *Message)
-	neac.MQTTClient.Subscribe(strings.Replace(NodeEventMessagesIndexation, "{index}", index, 1), 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
+	topic := strings.Replace(NodeEventMessagesIndexation, "{index}", index, 1)
+	neac.MQTTClient.Subscribe(topic, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
 		msg := &Message{}
 		if _, err := msg.Deserialize(mqttMsg.Payload(), DeSeriModePerformValidation); err != nil {
 			sendErrOrDrop(neac.Errors, err)
@@ -192,11 +216,19 @@ func (neac *NodeEventAPIClient) MessagesWithIndex(index string) <-chan *Message 
 		case channel <- msg:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(topic)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // MessageMetadataChange returns a channel of MessageMetadataResponse each time the given message's state changes.
-func (neac *NodeEventAPIClient) MessageMetadataChange(msgID MessageID) <-chan *MessageMetadataResponse {
+func (neac *NodeEventAPIClient) MessageMetadataChange(ctx context.Context, msgID MessageID) <-chan *MessageMetadataResponse {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *MessageMetadataResponse)
 	topic := strings.Replace(NodeEventMessagesMetadata, "{messageId}", MessageIDToHexString(msgID), 1)
@@ -212,11 +244,19 @@ func (neac *NodeEventAPIClient) MessageMetadataChange(msgID MessageID) <-chan *M
 		case channel <- metadataRes:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(topic)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // AddressOutputs returns a channel of newly created or spent outputs on the given address.
-func (neac *NodeEventAPIClient) AddressOutputs(addr Address, netPrefix NetworkPrefix) <-chan *NodeOutputResponse {
+func (neac *NodeEventAPIClient) AddressOutputs(ctx context.Context, addr Address, netPrefix NetworkPrefix) <-chan *NodeOutputResponse {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *NodeOutputResponse)
 	topic := strings.Replace(NodeEventAddressesOutput, "{address}", addr.Bech32(netPrefix), 1)
@@ -232,11 +272,19 @@ func (neac *NodeEventAPIClient) AddressOutputs(addr Address, netPrefix NetworkPr
 		case channel <- res:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(topic)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // Ed25519AddressOutputs returns a channel of newly created or spent outputs on the given ed25519 address.
-func (neac *NodeEventAPIClient) Ed25519AddressOutputs(addr *Ed25519Address) <-chan *NodeOutputResponse {
+func (neac *NodeEventAPIClient) Ed25519AddressOutputs(ctx context.Context, addr *Ed25519Address) <-chan *NodeOutputResponse {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *NodeOutputResponse)
 	topic := strings.Replace(NodeEventAddressesEd25519Output, "{address}", addr.String(), 1)
@@ -252,11 +300,19 @@ func (neac *NodeEventAPIClient) Ed25519AddressOutputs(addr *Ed25519Address) <-ch
 		case channel <- res:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(topic)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // TransactionIncludedMessage returns a channel of the included message which carries the transaction with the given ID.
-func (neac *NodeEventAPIClient) TransactionIncludedMessage(txID TransactionID) <-chan *Message {
+func (neac *NodeEventAPIClient) TransactionIncludedMessage(ctx context.Context, txID TransactionID) <-chan *Message {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *Message)
 	topic := strings.Replace(NodeEventTransactionsIncludedMessage, "{transactionId}", MessageIDToHexString(txID), 1)
@@ -272,11 +328,19 @@ func (neac *NodeEventAPIClient) TransactionIncludedMessage(txID TransactionID) <
 		case channel <- msg:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(topic)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // Output returns a channel which immediately returns the output with the given ID and afterwards when its state changes.
-func (neac *NodeEventAPIClient) Output(outputID UTXOInputID) <-chan *NodeOutputResponse {
+func (neac *NodeEventAPIClient) Output(ctx context.Context, outputID UTXOInputID) <-chan *NodeOutputResponse {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *NodeOutputResponse)
 	topic := strings.Replace(NodeEventOutputs, "{outputId}", hex.EncodeToString(outputID[:]), 1)
@@ -292,11 +356,19 @@ func (neac *NodeEventAPIClient) Output(outputID UTXOInputID) <-chan *NodeOutputR
 		case channel <- res:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(topic)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // Receipts returns a channel which returns newly applied receipts.
-func (neac *NodeEventAPIClient) Receipts() <-chan *Receipt {
+func (neac *NodeEventAPIClient) Receipts(ctx context.Context) <-chan *Receipt {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *Receipt)
 	neac.MQTTClient.Subscribe(NodeEventReceipts, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -311,6 +383,14 @@ func (neac *NodeEventAPIClient) Receipts() <-chan *Receipt {
 		case channel <- receipt:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventReceipts)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
@@ -321,7 +401,7 @@ type MilestonePointer struct {
 }
 
 // LatestMilestones returns a channel of newly seen latest milestones.
-func (neac *NodeEventAPIClient) LatestMilestones() <-chan *MilestonePointer {
+func (neac *NodeEventAPIClient) LatestMilestones(ctx context.Context) <-chan *MilestonePointer {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *MilestonePointer)
 	neac.MQTTClient.Subscribe(NodeEventMilestonesLatest, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -336,11 +416,19 @@ func (neac *NodeEventAPIClient) LatestMilestones() <-chan *MilestonePointer {
 		case channel <- msPointer:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventMilestonesLatest)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // LatestMilestoneMessages returns a channel of newly seen latest milestones messages.
-func (neac *NodeEventAPIClient) LatestMilestoneMessages(nodeHTTPAPIClient *NodeHTTPAPIClient) <-chan *Message {
+func (neac *NodeEventAPIClient) LatestMilestoneMessages(ctx context.Context, nodeHTTPAPIClient *NodeHTTPAPIClient) <-chan *Message {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *Message)
 	neac.MQTTClient.Subscribe(NodeEventMilestonesLatest, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -365,11 +453,19 @@ func (neac *NodeEventAPIClient) LatestMilestoneMessages(nodeHTTPAPIClient *NodeH
 		case channel <- msg:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventMilestonesLatest)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // ConfirmedMilestones returns a channel of newly confirmed milestones.
-func (neac *NodeEventAPIClient) ConfirmedMilestones() <-chan *MilestonePointer {
+func (neac *NodeEventAPIClient) ConfirmedMilestones(ctx context.Context) <-chan *MilestonePointer {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *MilestonePointer)
 	neac.MQTTClient.Subscribe(NodeEventMilestonesConfirmed, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -384,11 +480,19 @@ func (neac *NodeEventAPIClient) ConfirmedMilestones() <-chan *MilestonePointer {
 		case channel <- msPointer:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventMilestonesConfirmed)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
 
 // ConfirmedMilestoneMessages returns a channel of newly confirmed milestones messages.
-func (neac *NodeEventAPIClient) ConfirmedMilestoneMessages(nodeHTTPAPIClient *NodeHTTPAPIClient) <-chan *Message {
+func (neac *NodeEventAPIClient) ConfirmedMilestoneMessages(ctx context.Context, nodeHTTPAPIClient *NodeHTTPAPIClient) <-chan *Message {
 	panicIfNodeEventAPIClientInactive(neac)
 	channel := make(chan *Message)
 	neac.MQTTClient.Subscribe(NodeEventMilestonesConfirmed, 2, func(client mqtt.Client, mqttMsg mqtt.Message) {
@@ -413,5 +517,13 @@ func (neac *NodeEventAPIClient) ConfirmedMilestoneMessages(nodeHTTPAPIClient *No
 		case channel <- msg:
 		}
 	})
+	go func() {
+		select {
+		case <-ctx.Done():
+			neac.MQTTClient.Unsubscribe(NodeEventMilestonesConfirmed)
+		case <-neac.Ctx.Done():
+			return
+		}
+	}()
 	return channel
 }
